@@ -232,6 +232,9 @@ git fetch upstream && git log --oneline HEAD..upstream/main
 - `ROUTING_REMOVE_*` — вырезание правил апстрима. Нужно потому, что апстрим использует коды
   из кастомных баз roscomvpn (`geosite:twitch-ads`, `geosite:whitelist`, `geosite:torrent`,
   `geoip:direct`), которых нет в стандартных базах — клиенты на них не стартуют.
+- `GEO_URL_MIRROR` — подмена хоста в `Geoipurl`/`Geositeurl` на своё зеркало. Нужно потому, что
+  апстрим раздаёт `geoip.dat` / `geosite.dat` через jsDelivr, доступный не везде. Остаток пути
+  сохраняется, поэтому версия баз продолжает приходить из апстрима.
 
 Деплой на проде — локальной сборкой (`build: .` в docker-compose.yml), образы из реестра
 не используются.
