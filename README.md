@@ -119,12 +119,8 @@ docker compose up -d
 | `ROUTING_REMOVE_BLOCK_SITES` | нет | — | Правила, вырезаемые из block (сайты) |
 | `ROUTING_REMOVE_BLOCK_IP` | нет | — | Правила, вырезаемые из block (IP) |
 | `SQUAD_N_EXTRA_*` | нет | — | То же, что `ROUTING_EXTRA_*`, но для конкретного сквада (например `SQUAD_1_EXTRA_DIRECT_SITES`) |
-| `SQUAD_N_REMOVE_*` | нет | — | То же, что `ROUTING_REMOVE_*`, но для конкретного сквада |
-
-Удаление применяется **до** добавления extras. Оно нужно, когда апстримный роутинг ссылается на коды из
-кастомных geosite/geoip (например `geosite:twitch-ads`, `geosite:whitelist`, `geosite:torrent`, `geoip:direct`):
-клиенты со стандартными базами такие коды не резолвят и падают с ошибкой
-`failed to check code TWITCH-ADS from geosite.dat > failed to build routing configuration`.
+| `SQUAD_N_REMOVE_*` | нет | — | То же, что `ROUTING_REMOVE_*`, но для конкретного сквада удаление применяется **до** добавления extras. Оно нужно, когда апстримный роутинг ссылается на коды из кастомных geosite/geoip (например `geosite:twitch-ads`, `geosite:whitelist`, `geosite:torrent`, `geoip:direct`): клиенты со стандартными базами такие коды не резолвят и падают с ошибкой `failed to check code TWITCH-ADS from geosite.dat > failed to build routing configuration`. |
+| `GEO_URL_MIRROR` | нет | — | Зеркало для geo-баз: подменяет хост в `Geoipurl` и `Geositeurl`, остаток пути сохраняется. Может включать путь (`https://mirror.example.com/jsd/`). Общая для настроек подписки и всех сквадов |
 | `ROUTING_NAME` | нет | — | Название роутинга (поле `Name`, показывается в Happ). Заменяет значение из GitHub-конфига |
 | `SQUAD_N_NAME` | нет | — | То же, что `ROUTING_NAME`, но для конкретного сквада |
 
@@ -179,6 +175,26 @@ SQUAD_1_EXTRA_DIRECT_SITES=geosite:corp-internal
 ROUTING_NAME=Березка VPN
 SQUAD_1_NAME=Березка VPN
 ```
+
+### Зеркало для geo-баз
+
+Апстримный конфиг раздаёт `geoip.dat` / `geosite.dat` через jsDelivr, который доступен не везде.
+`GEO_URL_MIRROR` подменяет хост в полях `Geoipurl` и `Geositeurl`, сохраняя остаток пути — версия баз
+(`@202609120752`) и структура путей продолжают приходить из апстрима, меняется только источник раздачи:
+
+```env
+GEO_URL_MIRROR=https://mirror.example.com/jsd/
+```
+
+```
+было:  https://cdn.jsdelivr.net/gh/hydraponique/roscomvpn-geoip@202609120752/release/geoip.dat
+стало: https://mirror.example.com/jsd/gh/hydraponique/roscomvpn-geoip@202609120752/release/geoip.dat
+```
+
+Зеркало может включать путь (`https://mirror.example.com/jsd/`), хвостовой слэш не обязателен.
+Подменяется любой хост из апстрим-конфига, не только `cdn.jsdelivr.net`, — так подмена не сломается,
+если апстрим переедет на другой CDN. Переменная одна на весь сервис: варианта `SQUAD_N_GEO_URL_MIRROR` нет,
+значение применяется и к настройкам подписки, и ко всем сквадам.
 
 ## Логи
 

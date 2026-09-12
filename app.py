@@ -6,6 +6,7 @@ import logging
 import requests
 import urllib3
 from datetime import datetime
+from urllib.parse import urlsplit, urlunsplit
 
 logging.basicConfig(
     level=logging.INFO,
@@ -22,6 +23,7 @@ GITHUB_RAW_URL = os.environ.get(
 )
 CHECK_INTERVAL = int(os.environ.get("CHECK_INTERVAL", "300"))  # seconds
 CRON_SCHEDULE = os.environ.get("CRON_SCHEDULE", "").strip()
+GEO_URL_MIRROR = os.environ.get("GEO_URL_MIRROR", "").strip()
 SSL_VERIFY = REMNA_BASE_URL.startswith("https://")
 
 REMNA_HEADERS = {
@@ -45,6 +47,9 @@ ROUTING_LIST_FIELDS = {
     "BLOCK_SITES": "BlockSites",
     "BLOCK_IP": "BlockIp",
 }
+
+# Поля happRouting с URL geo-баз; origin подменяется на GEO_URL_MIRROR
+GEO_URL_FIELDS = ("Geoipurl", "Geositeurl")
 
 
 def parse_extra_list(value: str) -> list[str]:
@@ -132,19 +137,48 @@ def merge_routing_lists(base: list, extra: list) -> list:
     return merged
 
 
+def rewrite_geo_url(url: str, mirror: str) -> str:
+    """Подменяет origin (scheme://host) URL geo-базы на зеркало, сохраняя остаток пути."""
+    parts = urlsplit(url)
+    if not parts.scheme or not parts.netloc:
+        return url
+
+    base = mirror.rstrip("/")
+    if url == base or url.startswith(f"{base}/"):
+        return url
+
+    return urlunsplit(
+        urlsplit(f"{base}/{parts.path.lstrip('/')}")._replace(
+            query=parts.query,
+            fragment=parts.fragment,
+        )
+    )
+
+
 def apply_routing_extras(
     deeplink: str,
     extras: dict[str, list[str]],
     overrides: dict[str, str] | None = None,
     removes: dict[str, list[str]] | None = None,
+    geo_mirror: str = "",
 ) -> str:
     overrides = overrides or {}
     removes = removes or {}
-    if not extras and not overrides and not removes:
+    if not extras and not overrides and not removes and not geo_mirror:
         return deeplink.strip()
 
     prefix, routing = parse_deeplink(deeplink)
     changed = False
+    if geo_mirror:
+        for json_key in GEO_URL_FIELDS:
+            current = routing.get(json_key)
+            if not isinstance(current, str) or not current:
+                continue
+            new_url = rewrite_geo_url(current, geo_mirror)
+            if new_url != current:
+                routing[json_key] = new_url
+                changed = True
+                log.info("Geo URL %s rewritten to mirror: %s", json_key, new_url)
     for json_key, items in removes.items():
         current = routing.get(json_key)
         if not isinstance(current, list):
@@ -265,6 +299,7 @@ def run_cycle(settings_uuid: str, state: dict, squads: list) -> None:
             state["routing_extras"],
             state["routing_overrides"],
             state["routing_removes"],
+            GEO_URL_MIRROR,
         )
         if target_deeplink != github_deeplink:
             log.info("Applied routing extras to subscription settings deeplink")
@@ -292,6 +327,7 @@ def run_cycle(settings_uuid: str, state: dict, squads: list) -> None:
                 squad["routing_extras"],
                 squad["routing_overrides"],
                 squad["routing_removes"],
+                GEO_URL_MIRROR,
             )
             if target_deeplink != deeplink:
                 log.info("Applied routing extras for squad %s", squad["uuid"])
@@ -341,6 +377,8 @@ def main():
             log.info("Routing removes for %s: %s", field, ", ".join(items))
     for field, value in sorted(routing_overrides.items()):
         log.info("Routing override for %s: %s", field, value)
+    if GEO_URL_MIRROR:
+        log.info("Geo URL mirror: %s", GEO_URL_MIRROR)
 
     squads = load_squad_configs()
     log.info("Loaded %d external squad(s)", len(squads))
