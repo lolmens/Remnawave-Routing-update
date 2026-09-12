@@ -30,6 +30,7 @@ REMNA_HEADERS = {
     "Accept": "application/json",
     "Authorization": f"Bearer {REMNA_TOKEN}",
 }
+ROUTING_HEADER = "routing"
 
 if not SSL_VERIFY:
     urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -227,13 +228,27 @@ def load_squad_configs() -> list:
             "uuid": uuid,
             "url": url,
             "current_routing": None,
-            "current_settings": {},
+            "response_headers_add": {},
+            "response_headers_remove": [],
             "routing_extras": load_routing_extras(f"SQUAD_{i}"),
             "routing_overrides": load_routing_overrides(f"SQUAD_{i}"),
             "routing_removes": load_routing_removes(f"SQUAD_{i}"),
         })
         i += 1
     return squads
+
+
+def get_routing_header(headers: dict | None) -> str:
+    for key, value in (headers or {}).items():
+        if key.lower() == ROUTING_HEADER:
+            return (value or "").strip()
+    return ""
+
+
+def with_routing_header(headers: dict | None, routing: str) -> dict:
+    merged = {key: value for key, value in (headers or {}).items() if key.lower() != ROUTING_HEADER}
+    merged[ROUTING_HEADER] = routing
+    return merged
 
 
 def get_remna_settings() -> dict:
@@ -270,17 +285,65 @@ def get_external_squad(squad_uuid: str) -> dict:
     return resp.json()
 
 
-def patch_external_squad(squad_uuid: str, routing: str, current_settings: dict) -> dict:
-    merged = {**current_settings, "happRouting": routing}
+def patch_external_squad(
+    squad_uuid: str,
+    response_headers_add: dict,
+    response_headers_remove: list,
+) -> dict:
+    payload = {
+        "uuid": squad_uuid,
+        "responseHeadersAdd": response_headers_add,
+    }
+    # Если routing был явно удалён в настройках сквада, убираем конфликт.
+    filtered_remove = [header for header in response_headers_remove if header.lower() != ROUTING_HEADER]
+    if filtered_remove != response_headers_remove:
+        payload["responseHeadersRemove"] = filtered_remove
+
     resp = requests.patch(
         f"{REMNA_BASE_URL}/external-squads",
         headers={**REMNA_HEADERS, "Content-Type": "application/json"},
-        json={"uuid": squad_uuid, "subscriptionSettings": merged},
+        json=payload,
         timeout=30,
         verify=SSL_VERIFY,
     )
     resp.raise_for_status()
     return resp.json()
+
+
+def fetch_custom_response_headers(fallback: dict) -> dict:
+    """Свежий снимок customResponseHeaders настроек подписки.
+
+    PATCH перезаписывает объект заголовков целиком, поэтому перед записью нужно
+    актуальное состояние, а не кеш со старта контейнера. При ошибке возвращаем кеш:
+    лучше обновить роутинг по устаревшему снимку, чем не обновить вовсе.
+    """
+    try:
+        settings = get_remna_settings()
+        data = settings.get("response", settings)
+        return data.get("customResponseHeaders", {}) or {}
+    except Exception:
+        log.exception("Failed to refresh customResponseHeaders, using cached snapshot")
+        return fallback
+
+
+def fetch_squad_response_headers(
+    squad_uuid: str,
+    fallback_add: dict,
+    fallback_remove: list,
+) -> tuple[dict, list]:
+    """Свежий снимок responseHeadersAdd / responseHeadersRemove сквада."""
+    try:
+        data = get_external_squad(squad_uuid)
+        squad_data = data.get("response", data)
+        return (
+            squad_data.get("responseHeadersAdd", {}) or {},
+            squad_data.get("responseHeadersRemove", []) or [],
+        )
+    except Exception:
+        log.exception(
+            "Failed to refresh response headers for squad %s, using cached snapshot", squad_uuid
+        )
+        return fallback_add, fallback_remove
 
 
 def get_github_deeplink(url: str) -> str:
@@ -306,12 +369,23 @@ def run_cycle(settings_uuid: str, state: dict, squads: list) -> None:
 
         if not routing_configs_equal(target_deeplink, state["current_routing"]):
             log.info("Routing changed! Updating subscription settings...")
+            # customResponseHeaders перезаписывается целиком, поэтому снимок заголовков
+            # берём прямо перед PATCH: стартовый кеш может быть многодневной давности
+            # (режим CRON_SCHEDULE), и чужие заголовки из панели затёрлись бы.
+            state["custom_response_headers"] = fetch_custom_response_headers(
+                state["custom_response_headers"]
+            )
+            updated_headers = with_routing_header(
+                state["custom_response_headers"],
+                target_deeplink,
+            )
             result = patch_remna_settings({
                 "uuid": settings_uuid,
-                "happRouting": target_deeplink,
+                "customResponseHeaders": updated_headers,
             })
+            state["custom_response_headers"] = updated_headers
             state["current_routing"] = target_deeplink
-            log.info("Successfully updated happRouting in subscription settings")
+            log.info("Successfully updated routing response header in subscription settings")
             log.debug("Patch response: %s", result)
         else:
             log.info("No changes detected in subscription settings")
@@ -333,10 +407,28 @@ def run_cycle(settings_uuid: str, state: dict, squads: list) -> None:
                 log.info("Applied routing extras for squad %s", squad["uuid"])
             if not routing_configs_equal(target_deeplink, squad["current_routing"] or ""):
                 log.info("Routing changed for squad %s! Updating...", squad["uuid"])
-                patch_external_squad(squad["uuid"], target_deeplink, squad["current_settings"])
-                squad["current_settings"] = {**squad["current_settings"], "happRouting": target_deeplink}
+                squad["response_headers_add"], squad["response_headers_remove"] = fetch_squad_response_headers(
+                    squad["uuid"],
+                    squad["response_headers_add"],
+                    squad["response_headers_remove"],
+                )
+                updated_headers = with_routing_header(
+                    squad["response_headers_add"],
+                    target_deeplink,
+                )
+                patch_external_squad(
+                    squad["uuid"],
+                    updated_headers,
+                    squad["response_headers_remove"],
+                )
+                squad["response_headers_add"] = updated_headers
+                squad["response_headers_remove"] = [
+                    header
+                    for header in squad["response_headers_remove"]
+                    if header.lower() != ROUTING_HEADER
+                ]
                 squad["current_routing"] = target_deeplink
-                log.info("Successfully updated happRouting for squad %s", squad["uuid"])
+                log.info("Successfully updated routing response header for squad %s", squad["uuid"])
             else:
                 log.info("No changes detected for squad %s", squad["uuid"])
         except Exception:
@@ -359,14 +451,16 @@ def main():
     routing_extras = load_routing_extras()
     routing_overrides = load_routing_overrides()
     routing_removes = load_routing_removes()
+    custom_response_headers = data.get("customResponseHeaders", {}) or {}
     state = {
-        "current_routing": (data.get("happRouting", "") or "").strip(),
+        "custom_response_headers": custom_response_headers,
+        "current_routing": get_routing_header(custom_response_headers),
         "routing_extras": routing_extras,
         "routing_overrides": routing_overrides,
         "routing_removes": routing_removes,
     }
     log.info("Settings UUID: %s", settings_uuid)
-    log.info("Current happRouting loaded (%d chars)", len(state["current_routing"]))
+    log.info("Current routing response header loaded (%d chars)", len(state["current_routing"]))
     if routing_extras:
         for field, items in sorted(routing_extras.items()):
             log.info("Routing extras for %s: %s", field, ", ".join(items))
@@ -386,9 +480,14 @@ def main():
         try:
             data = get_external_squad(squad["uuid"])
             squad_data = data.get("response", data)
-            squad["current_settings"] = squad_data.get("subscriptionSettings", {}) or {}
-            squad["current_routing"] = (squad["current_settings"].get("happRouting", "") or "").strip()
-            log.info("Squad %s current happRouting loaded (%d chars)", squad["uuid"], len(squad["current_routing"]))
+            squad["response_headers_add"] = squad_data.get("responseHeadersAdd", {}) or {}
+            squad["response_headers_remove"] = squad_data.get("responseHeadersRemove", []) or []
+            squad["current_routing"] = get_routing_header(squad["response_headers_add"])
+            log.info(
+                "Squad %s current routing response header loaded (%d chars)",
+                squad["uuid"],
+                len(squad["current_routing"]),
+            )
             if squad["routing_extras"]:
                 log.info(
                     "Squad %s routing extras configured: %s",

@@ -1,15 +1,26 @@
 # Remna Routing Updater
 
-Микросервис для автоматического обновления `happRouting` в Remna панели при появлении новых данных в GitHub-репозитории [roscomvpn-happ-routing](https://github.com/hydraponique/roscomvpn-happ-routing).
+Микросервис для автоматического обновления кастомного заголовка ответа `routing` в Remna панели при появлении новых данных в GitHub-репозитории [roscomvpn-happ-routing](https://github.com/hydraponique/roscomvpn-happ-routing).
 
 ## Как работает
 
-1. При запуске получает текущий `happRouting` из настроек подписки (`GET /subscription-settings`) и из каждого настроенного внешнего сквада (`GET /external-squads/{uuid}`)
+1. При запуске получает заголовок `routing` из настроек подписки и из настроек каждого настроенного внешнего сквада
 2. Проверяет файлы с роутингом на GitHub — по интервалу (`CHECK_INTERVAL`) или по расписанию (`CRON_SCHEDULE`)
-3. Если содержимое изменилось — отправляет обновление в Remna
+3. Если содержимое изменилось — отправляет новое содержимое заголовка `routing` в Remna
 4. Если изменений нет — ничего не делает
 
 Настройки подписки и каждый внешний сквад отслеживаются **независимо**: у каждого свой GitHub URL и свой кеш текущего роутинга. Изменение в одном не затрагивает остальные.
+
+> **Требуется Remnawave 3.0.0+.** Начиная с 3.0.0 роутинг хранится не в поле `happRouting`, а в
+> кастомном заголовке ответа `routing`: у настроек подписки — в `customResponseHeaders`, у внешнего
+> сквада — в `responseHeadersAdd`. На панели 2.x этот апдейтер работать не будет — для неё нужен
+> коммит форка до мерджа поддержки 3.0.0.
+
+Панель принимает объект заголовков целиком, поэтому апдейтер перед каждой записью перечитывает
+текущие заголовки и подменяет в них только `routing`. Остальные заголовки (`profile-title`,
+`support-url` и прочие), в том числе добавленные в панели уже после запуска контейнера,
+сохраняются. Если сквад явно удалял `routing` через `responseHeadersRemove`, эта запись убирается,
+иначе она перебивала бы добавленный заголовок.
 
 ## Быстрый старт
 
@@ -47,13 +58,13 @@ services:
 Создайте файл `.env`:
 
 ```env
-REMNA_BASE_URL=http://remnawave-backend:3000/api
+REMNA_BASE_URL=http://remnawave:3000/api
 REMNA_TOKEN=your_bearer_token
 # GITHUB_RAW_URL=https://raw.githubusercontent.com/hydraponique/roscomvpn-happ-routing/refs/heads/main/HAPP/DEFAULT.DEEPLINK
 # CHECK_INTERVAL=300
 ```
 
-> `remnawave-backend` — имя контейнера панели, `3000` — порт по умолчанию. Измените при необходимости.
+> `remnawave` — имя контейнера панели, `3000` — порт по умолчанию. Измените при необходимости.
 
 Создайте файл `docker-compose.yml`:
 
@@ -99,7 +110,7 @@ docker compose up -d
 
 | Переменная | Обязательная | По умолчанию | Описание |
 |---|---|---|---|
-| `REMNA_BASE_URL` | да | — | Базовый URL API Remna (например `https://host/api` или `http://remnawave-backend:3000/api`) |
+| `REMNA_BASE_URL` | да | — | Базовый URL API Remna (например `https://host/api` или `http://remnawave:3000/api`) |
 | `REMNA_TOKEN` | да | — | Bearer-токен для авторизации в Remna API |
 | `GITHUB_RAW_URL` | нет | [DEFAULT.DEEPLINK](https://raw.githubusercontent.com/hydraponique/roscomvpn-happ-routing/refs/heads/main/HAPP/DEFAULT.DEEPLINK) | URL файла с роутингом для настроек подписки |
 | `CHECK_INTERVAL` | нет | `300` | Интервал проверки обновлений (в секундах), общий для всех |
@@ -206,17 +217,11 @@ docker compose logs -f
 
 MIT
 
-## Форк: отличия от оригинала и почему он не мерджится
+## Форк: отличия от оригинала
 
 Оригинал — [lifeindarkside/Remnawave-Routing-update](https://github.com/lifeindarkside/Remnawave-Routing-update).
-
-**Не мерджить upstream/main, пока панель не обновлена до 3.x.** Коммит `aa501c7`
-(«remnawave panel 3.0.0 support») переносит роутинг из поля `happRouting` в заголовки
-ответа (`responseHeadersAdd`). Наша панель — `remnawave/backend:2`, версия 2.8.1, где
-роутинг живёт именно в `happRouting`. После мерджа апдейтер перестанет обновлять роутинг,
-а `patch_external_squad` начнёт слать payload, которого API 2.8.1 не понимает.
-
-Остальные коммиты оригинала (на 2026-08-31) — правки README, полезного для нас нет.
+`upstream/main` влит, поддержка Remnawave 3.0.0+ (заголовок `routing`) на месте — прежнее
+ограничение «не мерджить upstream» снято.
 
 Проверить расхождение:
 
@@ -235,6 +240,11 @@ git fetch upstream && git log --oneline HEAD..upstream/main
 - `GEO_URL_MIRROR` — подмена хоста в `Geoipurl`/`Geositeurl` на своё зеркало. Нужно потому, что
   апстрим раздаёт `geoip.dat` / `geosite.dat` через jsDelivr, доступный не везде. Остаток пути
   сохраняется, поэтому версия баз продолжает приходить из апстрима.
+- Перечитывание заголовков перед записью. Оригинал держит снимок заголовков со старта контейнера
+  и отправляет его обратно при каждом обновлении, затирая всё, что админ поменял в панели позже
+  (в режиме `CRON_SCHEDULE` снимок живёт сутками). Форк обновляет снимок непосредственно перед PATCH.
+- Сравнение роутинга по содержимому, а не по строке: деплинк декодируется из base64 и сравнивается
+  как JSON, поэтому разница в паддинге или порядке ключей не вызывает лишних записей в панель.
 
 Деплой на проде — локальной сборкой (`build: .` в docker-compose.yml), образы из реестра
 не используются.
