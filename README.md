@@ -220,8 +220,7 @@ MIT
 ## Форк: отличия от оригинала
 
 Оригинал — [lifeindarkside/Remnawave-Routing-update](https://github.com/lifeindarkside/Remnawave-Routing-update).
-`upstream/main` влит, поддержка Remnawave 3.0.0+ (заголовок `routing`) на месте — прежнее
-ограничение «не мерджить upstream» снято.
+`upstream/main` влит, поддержка Remnawave 3.0.0+ (заголовок `routing`) на месте.
 
 Проверить расхождение:
 
